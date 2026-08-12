@@ -38,6 +38,27 @@ function containsKeyword(text) {
 }
 
 async function fetchOgloszenia() {
+  // TRYB TESTOWY — zwraca sztuczne dane, żeby sprawdzić czy cały pipeline
+  // (Supabase, e-mail, Telegram, deduplikacja) działa poprawnie, zanim podłączymy
+  // realne źródło (e-Zamówienia / Oferteo / inny portal).
+  //
+  // ExternalId zawiera znacznik czasu, więc przy każdym ręcznym odpaleniu workflow
+  // powstanie "nowy" testowy lead — to celowe, żeby łatwo bylo weryfikować że
+  // zapis/powiadomienia faktycznie się wykonują.
+  //
+  // TODO PO TESTACH: zamień na realne źródło i usuń ten blok testowy.
+  if (process.env.TEST_MODE === 'true') {
+    return [
+      {
+        id: `test-${Date.now()}`,
+        title: 'TEST: Wykonanie posadzki żywicznej w hali produkcyjnej',
+        url: 'https://example.com/testowe-ogloszenie',
+        date: new Date().toISOString().slice(0, 10),
+        organization: 'Firma Testowa Sp. z o.o.',
+      },
+    ];
+  }
+
   // TODO: podmień na realne źródło.
   // Przykład: publiczne API e-Zamówienia albo endpoint z Oferteo/Fixly (jeśli dostępny).
   // Poniżej placeholder pokazujący oczekiwany kształt danych.
