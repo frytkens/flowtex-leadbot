@@ -4,10 +4,13 @@
 // Odpalany cyklicznie (przez GitHub Actions -> GET na ten endpoint).
 //
 // Co robi:
-// 1. Pobiera listę ogłoszeń ze źródła (tu: przykładowy fetch do API/HTML źródła — DO PODMIANY na realne)
-// 2. Filtruje po słowach kluczowych związanych z posadzkami żywicznymi
+// 1. Pobiera ogłoszenia z publicznego, bezpłatnego API BZP Platformy e-Zamówienia
+//    (https://ezamowienia.gov.pl/mo-board/api/v1/notice), osobno dla każdego słowa
+//    kluczowego (parametr OrderObject), z okna ostatnich 24h.
+// 2. Dodatkowo filtruje wynik lokalnie (bezpiecznik) po słowach kluczowych związanych
+//    z posadzkami żywicznymi.
 // 3. Odrzuca duplikaty (na podstawie ExternalId zapisanego w bazie — UNIQUE constraint w Supabase)
-// 4. Zapisuje nowe leady do Supabase i wysyła powiadomienie (Slack webhook)
+// 4. Zapisuje nowe leady do Supabase i wysyła powiadomienie (e-mail + Telegram)
 //
 // Wymagane zmienne środowiskowe (ustawiane w Vercel -> Project -> Settings -> Environment Variables):
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_TABLE_NAME (domyślnie "leady")
@@ -37,16 +40,40 @@ function containsKeyword(text) {
   return KEYWORDS.some((kw) => lower.includes(kw));
 }
 
+function formatDateForApi(date) {
+  // API wymaga formatu YYYY-MM-DDThh:mm:ss BEZ strefy czasowej/Z na końcu.
+  return date.toISOString().slice(0, 19);
+}
+
+async function fetchOgloszeniaDlaSlowa(keyword, dateFrom, dateTo) {
+  const params = new URLSearchParams({
+    NoticeType: 'ContractNotice', // ogłoszenie o zamówieniu — główny typ nas interesujący
+    OrderObject: keyword,          // wyszukiwanie po nazwie zamówienia (fraza)
+    PublicationDateFrom: formatDateForApi(dateFrom),
+    PublicationDateTo: formatDateForApi(dateTo),
+    PageSize: '100',
+  });
+
+  const url = `https://ezamowienia.gov.pl/mo-board/api/v1/notice?${params.toString()}`;
+
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Błąd API e-Zamówienia (${keyword}): ${res.status} ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  // API zwraca płaską tablicę obiektów NoticeDto (patrz bzp.external.API.yaml)
+  return Array.isArray(data) ? data : [];
+}
+
 async function fetchOgloszenia() {
   // TRYB TESTOWY — zwraca sztuczne dane, żeby sprawdzić czy cały pipeline
-  // (Supabase, e-mail, Telegram, deduplikacja) działa poprawnie, zanim podłączymy
-  // realne źródło (e-Zamówienia / Oferteo / inny portal).
-  //
-  // ExternalId zawiera znacznik czasu, więc przy każdym ręcznym odpaleniu workflow
-  // powstanie "nowy" testowy lead — to celowe, żeby łatwo bylo weryfikować że
-  // zapis/powiadomienia faktycznie się wykonują.
-  //
-  // TODO PO TESTACH: zamień na realne źródło i usuń ten blok testowy.
+  // (Supabase, e-mail, Telegram, deduplikacja) działa poprawnie, niezależnie
+  // od tego, czy realne API akurat coś zwraca.
   if (process.env.TEST_MODE === 'true') {
     return [
       {
@@ -59,24 +86,39 @@ async function fetchOgloszenia() {
     ];
   }
 
-  // TODO: podmień na realne źródło.
-  // Przykład: publiczne API e-Zamówienia albo endpoint z Oferteo/Fixly (jeśli dostępny).
-  // Poniżej placeholder pokazujący oczekiwany kształt danych.
-  const res = await fetch('https://ezamowienia.gov.pl/mo-client-board/api/v1/notices?query=posadzka');
-  if (!res.ok) {
-    throw new Error(`Błąd pobierania ogłoszeń: ${res.status}`);
-  }
-  const data = await res.json();
+  // Realne źródło: publiczne, bezpłatne API BZP Platformy e-Zamówienia.
+  // Dokumentacja: "Instrukcja integracji z API BZP Platformy e-Zamówienia".
+  // Endpoint zwraca ogłoszenia pasujące do OrderObject (fraza w nazwie zamówienia),
+  // więc odpytujemy osobno dla każdego słowa kluczowego i łączymy wyniki.
+  const dateTo = new Date();
+  const dateFrom = new Date(dateTo.getTime() - 24 * 60 * 60 * 1000); // ostatnie 24h
 
-  // Zakładamy, że API zwraca tablicę obiektów { id, title, url, publishDate, organization }
-  // Dostosuj mapowanie do realnej struktury odpowiedzi.
-  return (data.items || []).map((item) => ({
-    id: item.id,
-    title: item.title,
-    url: item.url,
-    date: item.publishDate,
-    organization: item.organization,
-  }));
+  const wszystkieWyniki = [];
+  const widzianeObjectId = new Set();
+
+  for (const keyword of KEYWORDS) {
+    const wyniki = await fetchOgloszeniaDlaSlowa(keyword, dateFrom, dateTo);
+    for (const item of wyniki) {
+      // Deduplikacja w ramach jednego przebiegu — to samo ogłoszenie może
+      // pasować do kilku słów kluczowych naraz.
+      if (widzianeObjectId.has(item.objectId)) continue;
+      widzianeObjectId.add(item.objectId);
+
+      wszystkieWyniki.push({
+        id: item.objectId,
+        title: item.orderObject || '(brak nazwy zamówienia)',
+        // API nie zwraca gotowego linku do ogłoszenia — budujemy link do
+        // wyszukiwarki BZP po numerze ogłoszenia, co pozwala łatwo je odnaleźć.
+        url: item.noticeNumber
+          ? `https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/${item.noticeNumber}`
+          : `https://ezamowienia.gov.pl/mo-client-board/bzp/list`,
+        date: item.publicationDate ? item.publicationDate.slice(0, 10) : null,
+        organization: item.organizationName,
+      });
+    }
+  }
+
+  return wszystkieWyniki;
 }
 
 const SUPABASE_TABLE = process.env.SUPABASE_TABLE_NAME || 'leady';
