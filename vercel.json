@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/scrape-przetargi",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
