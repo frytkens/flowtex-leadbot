@@ -90,14 +90,25 @@ async function fetchOgloszenia() {
   // Dokumentacja: "Instrukcja integracji z API BZP Platformy e-Zamówienia".
   // Endpoint zwraca ogłoszenia pasujące do OrderObject (fraza w nazwie zamówienia),
   // więc odpytujemy osobno dla każdego słowa kluczowego i łączymy wyniki.
+  //
+  // Okno czasowe jest celowo szersze niż częstotliwość harmonogramu (domyślnie
+  // 7 dni, harmonogram co 30 min) — to bezpieczne i zamierzone: deduplikacja
+  // po external_id (patrz isAlreadySaved) gwarantuje, że ogłoszenie już zapisane
+  // nie trafi drugi raz do bazy ani nie wygeneruje powtórnego powiadomienia.
+  // Szersze okno chroni przed "przegapieniem" ogłoszenia, gdyby jakiś przebieg
+  // harmonogramu się nie powiódł (np. chwilowa niedostępność API).
+  const SEARCH_WINDOW_DAYS = Number(process.env.SEARCH_WINDOW_DAYS || 7);
   const dateTo = new Date();
-  const dateFrom = new Date(dateTo.getTime() - 24 * 60 * 60 * 1000); // ostatnie 24h
+  const dateFrom = new Date(dateTo.getTime() - SEARCH_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
   const wszystkieWyniki = [];
   const widzianeObjectId = new Set();
+  const statystykiPerSlowo = {};
 
   for (const keyword of KEYWORDS) {
     const wyniki = await fetchOgloszeniaDlaSlowa(keyword, dateFrom, dateTo);
+    statystykiPerSlowo[keyword] = wyniki.length;
+
     for (const item of wyniki) {
       // Deduplikacja w ramach jednego przebiegu — to samo ogłoszenie może
       // pasować do kilku słów kluczowych naraz.
@@ -117,6 +128,8 @@ async function fetchOgloszenia() {
       });
     }
   }
+
+  console.log(`Wyniki per słowo kluczowe (okno ${SEARCH_WINDOW_DAYS} dni):`, statystykiPerSlowo);
 
   return wszystkieWyniki;
 }
@@ -260,6 +273,7 @@ export default async function handler(req, res) {
       sprawdzone: ogloszenia.length,
       dopasowane: trafienia.length,
       nowe: nowe.length,
+      nowLeady: nowe.map((l) => ({ tytul: l.title, organizacja: l.organization, link: l.url })),
     });
   } catch (err) {
     console.error(err);
