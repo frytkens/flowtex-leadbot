@@ -2,8 +2,8 @@ name: Scrape leady - przetargi
 
 on:
   schedule:
-    # co 30 minut
-    - cron: '*/30 * * * *'
+    # co 4 godziny
+    - cron: '0 */4 * * *'
   workflow_dispatch: {} # pozwala odpalić ręcznie z zakładki Actions
 
 jobs:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Wywołaj endpoint scrapera na Vercelu
         run: |
-          curl -sS -X GET "${{ secrets.SCRAPE_ENDPOINT_URL }}" \
+          RESPONSE=$(curl -sS -X GET "${{ secrets.SCRAPE_ENDPOINT_URL }}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            --fail
+            --fail)
+          echo "Odpowiedź endpointu:"
+          echo "$RESPONSE" | python3 -m json.tool || echo "$RESPONSE"
