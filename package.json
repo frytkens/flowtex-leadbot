@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "adm-zip": "^0.5.16",
+    "csv-parse": "^5.6.0",
     "nodemailer": "^6.9.14"
   }
 }
