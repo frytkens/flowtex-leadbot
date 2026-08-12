@@ -87,13 +87,17 @@ function mapNotice(item) {
   return {
     id: item.objectId,
     title: item.orderObject || '(brak nazwy zamówienia)',
-    // API nie zwraca gotowego linku do ogłoszenia — budujemy link do
-    // wyszukiwarki BZP po numerze ogłoszenia, co pozwala łatwo je odnaleźć.
+    // API nie zwraca gotowego linku do ogłoszenia. numer ogłoszenia bywa w formacie
+    // zawierającym spacje i ukośniki (np. "2026/BZP 00386025/01"), więc trzeba go
+    // zakodować, inaczej link się rozjeżdża. Kierujemy do wyszukiwarki BZP
+    // z numerem ogłoszenia jako parametrem zapytania (nie jako segment ścieżki),
+    // co jest bezpieczniejsze i pewniejsze niż zgadywanie formatu strony szczegółów.
     url: item.noticeNumber
-      ? `https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/${item.noticeNumber}`
+      ? `https://ezamowienia.gov.pl/mo-client-board/bzp/list?NoticeNumber=${encodeURIComponent(item.noticeNumber)}`
       : `https://ezamowienia.gov.pl/mo-client-board/bzp/list`,
     date: item.publicationDate ? item.publicationDate.slice(0, 10) : null,
     organization: item.organizationName,
+    noticeNumber: item.noticeNumber || null,
   };
 }
 
@@ -218,26 +222,38 @@ function getTransporter() {
   return cachedTransporter;
 }
 
-async function notifyEmail(lead) {
+async function notifyEmailBatch(leady) {
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD || !process.env.NOTIFY_EMAIL_TO) {
     return;
   }
+  if (leady.length === 0) return;
 
   const transporter = getTransporter();
+
+  const listaHtml = leady
+    .map(
+      (lead) => `
+        <li style="margin-bottom: 12px;">
+          <strong>${lead.title}</strong><br/>
+          Organizacja: ${lead.organization || 'brak danych'}<br/>
+          Data: ${lead.date || 'brak danych'}<br/>
+          ${lead.noticeNumber ? `Nr ogłoszenia: ${lead.noticeNumber}<br/>` : ''}
+          <a href="${lead.url}">${lead.url}</a>
+        </li>`
+    )
+    .join('');
 
   try {
     await transporter.sendMail({
       from: `"Leady Flowtex" <${process.env.GMAIL_USER}>`,
       to: process.env.NOTIFY_EMAIL_TO, // można podać kilka adresów oddzielonych przecinkiem
-      subject: `🎯 Nowy lead (przetarg): ${lead.title}`,
+      subject:
+        leady.length === 1
+          ? `🎯 Nowy lead (przetarg): ${leady[0].title}`
+          : `🎯 ${leady.length} nowych leadów (przetargi)`,
       html: `
-        <p><strong>Nowe zapytanie/przetarg pasujące do słów kluczowych:</strong></p>
-        <ul>
-          <li><strong>Tytuł:</strong> ${lead.title}</li>
-          <li><strong>Organizacja:</strong> ${lead.organization || 'brak danych'}</li>
-          <li><strong>Data:</strong> ${lead.date || 'brak danych'}</li>
-          <li><strong>Link:</strong> <a href="${lead.url}">${lead.url}</a></li>
-        </ul>
+        <p><strong>Nowe zapytania/przetargi pasujące do kryteriów wyszukiwania (${leady.length}):</strong></p>
+        <ul>${listaHtml}</ul>
       `,
     });
   } catch (err) {
@@ -245,31 +261,60 @@ async function notifyEmail(lead) {
   }
 }
 
-async function notifyTelegram(lead) {
+async function notifyTelegramBatch(leady) {
   if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) return;
+  if (leady.length === 0) return;
 
-  const text =
-    `🎯 *Nowy lead (przetarg)*\n` +
-    `${lead.title}\n` +
-    `Organizacja: ${lead.organization || 'brak danych'}\n` +
-    `${lead.url}`;
+  const naglowek =
+    leady.length === 1 ? `🎯 *Nowy lead (przetarg)*` : `🎯 *${leady.length} nowych leadów (przetargi)*`;
+
+  const listaTekst = leady
+    .map(
+      (lead) =>
+        `\n\n${lead.title}\nOrganizacja: ${lead.organization || 'brak danych'}${
+          lead.noticeNumber ? `\nNr ogłoszenia: ${lead.noticeNumber}` : ''
+        }\n${lead.url}`
+    )
+    .join('');
+
+  const text = `${naglowek}${listaTekst}`;
 
   const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'Markdown',
-      disable_web_page_preview: false,
-    }),
-  });
+  // Telegram ma limit ~4096 znaków na wiadomość — przy bardzo dużej liczbie
+  // leadów w jednym przebiegu dzielimy na kilka wiadomości, żeby nic nie ucięło.
+  const MAX_DLUGOSC = 3500;
+  const wiadomosci = [];
+  let biezaca = naglowek;
+  for (const lead of leady) {
+    const fragment = `\n\n${lead.title}\nOrganizacja: ${lead.organization || 'brak danych'}${
+      lead.noticeNumber ? `\nNr ogłoszenia: ${lead.noticeNumber}` : ''
+    }\n${lead.url}`;
+    if ((biezaca + fragment).length > MAX_DLUGOSC) {
+      wiadomosci.push(biezaca);
+      biezaca = fragment;
+    } else {
+      biezaca += fragment;
+    }
+  }
+  wiadomosci.push(biezaca);
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`Błąd wysyłki Telegram: ${res.status} ${body}`);
+  for (const wiadomosc of wiadomosci) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text: wiadomosc,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: false,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`Błąd wysyłki Telegram: ${res.status} ${body}`);
+    }
   }
 }
 
@@ -291,11 +336,14 @@ export default async function handler(req, res) {
       const juzZapisane = await isAlreadySaved(lead.id);
       if (!juzZapisane) {
         await saveToSupabase(lead);
-        await notifyEmail(lead);
-        await notifyTelegram(lead);
         nowe.push(lead);
       }
     }
+
+    // Powiadomienia wysyłane raz, zbiorczo dla wszystkich nowych leadów z tego
+    // przebiegu — zamiast osobnego maila/wiadomości na każdy lead z osobna.
+    await notifyEmailBatch(nowe);
+    await notifyTelegramBatch(nowe);
 
     return res.status(200).json({
       sprawdzone: ogloszenia.length,
