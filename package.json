@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "nodemailer": "^6.9.14"
+    "nodemailer": "^6.9.14",
+    "fast-xml-parser": "^4.4.1"
   }
 }
