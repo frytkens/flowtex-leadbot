@@ -4,11 +4,13 @@
 - `api/scrape-przetargi.js` — Vercel Serverless Function. Pobiera ogłoszenia, filtruje
   po słowach kluczowych ("posadzka żywiczna" itd.), zapisuje nowe leady do Supabase
   i wysyła powiadomienie **e-mailem (Nodemailer + Gmail) oraz na Telegram**.
-- `.github/workflows/scrape-leady.yml` — GitHub Actions, darmowy harmonogram co 30 min,
+- `.github/workflows/scrape-leady.yml` — GitHub Actions, darmowy harmonogram co 4h,
   wywołuje endpoint na Vercelu (omija limit "1x/dzień" z planu Hobby Vercela).
-- `vercel.json` — opcjonalny natywny cron Vercela (przydatny dopiero na planie Pro;
-  na Hobby zignoruje `0 * * * *` i tak odpali max raz dziennie, więc na start
-  polegaj na GitHub Actions).
+- `vercel.json` — pusty (celowo, bez sekcji `crons`). Plan Hobby na Vercelu
+  odrzuca deploy, jeśli cron w `vercel.json` jest częstszy niż raz dziennie —
+  a nam zależy na częstszym odpytywaniu (co 4h), więc cały harmonogram
+  realizuje GitHub Actions, nie natywny cron Vercela. Jeśli kiedyś przejdziesz
+  na plan Pro, możesz dopisać tu `crons` z dowolną częstotliwością.
 
 ## Krok po kroku
 
@@ -65,31 +67,106 @@ W repo: Settings -> Secrets and variables -> Actions, dodaj:
 - `SCRAPE_ENDPOINT_URL` -> np. `https://twoja-domena.vercel.app/api/scrape-przetargi`
 - `CRON_SECRET` -> ta sama wartość co w Vercelu
 
-### 6. Podmień źródło danych
-W `fetchOgloszenia()` w `api/scrape-przetargi.js` jest placeholder URL do e-Zamówienia —
-**trzeba go zweryfikować i dopasować do realnej struktury API/HTML** tego czy innego
-portalu (Oferteo, Fixly itp.). To jedyna część wymagająca ręcznej pracy przy starcie,
-bo każdy portal ma inny format danych.
+### 6. Źródło danych: API BZP Platformy e-Zamówienia
+Kod korzysta z realnego, publicznego i bezpłatnego API BZP:
+`https://ezamowienia.gov.pl/mo-board/api/v1/notice` (nie wymaga klucza/rejestracji
+dla odczytu ogłoszeń). Funkcja szuka **dwiema strategiami naraz**:
 
-### 7. Test
-- Zainstaluj zależności lokalnie: `npm install` (paczka `nodemailer` jest w `package.json`).
+- **A) słowa kluczowe w nazwie zamówienia** (`KEYWORDS`, parametr `OrderObject`) —
+  precyzyjne, ale rzadkie: tytuły ogłoszeń rzadko dosłownie zawierają frazy typu
+  "posadzka żywiczna".
+- **B) kody CPV robót posadzkarskich** (`CPV_CODES`, parametr `CpvCode`) — znacznie
+  pewniejszy sygnał, bo łapie ogłoszenie po oficjalnej klasyfikacji zamówienia,
+  niezależnie jak brzmi tytuł. Domyślne kody: `45262321-7` (wyrównywanie podłóg /
+  masy samopoziomujące), `45432111-5` (wykładziny obiektowe), `45431100-8`
+  (okładziny posadzkowe).
+
+Obie strategie odpytywane są dla dwóch typów ogłoszeń (`NOTICE_TYPES`):
+`ContractNotice` (pełna procedura) i `SmallContractNotice` (zamówienia poniżej
+progu ustawowego, częste przy mniejszych realizacjach). Wyniki są łączone
+i odduplikowane po `objectId`, z okna **ostatnich 7 dni** (domyślnie).
+
+**Dlaczego okno jest szersze niż harmonogram (7 dni vs co 4h):** to celowe
+i bezpieczne. Deduplikacja po `external_id` (patrz `isAlreadySaved` w kodzie) i tak
+gwarantuje, że ogłoszenie już zapisane w Supabase nie wygeneruje powtórnego wpisu
+ani powiadomienia — nawet jeśli codziennie pobierasz te same ogłoszenia z całego
+tygodnia, do bazy/powiadomień trafiają tylko naprawdę nowe pozycje. Szersze okno
+dodatkowo chroni przed "przegapieniem" ogłoszenia, gdyby jakiś przebieg harmonogramu
+się nie powiódł (np. chwilowa niedostępność API).
+
+Chcesz zmienić okno? Ustaw zmienną środowiskową `SEARCH_WINDOW_DAYS` w Vercelu
+(np. `14` dla dwóch tygodni) — bez zmian w kodzie. Chcesz dodać kolejne kody CPV
+albo słowa kluczowe? Edytuj listy `CPV_CODES`/`KEYWORDS` na początku pliku.
+
+Link w powiadomieniach prowadzi do wyszukiwarki BZP po numerze ogłoszenia — API nie
+zwraca gotowego linku bezpośredniego do strony ogłoszenia.
+
+**Podgląd wyników per zapytanie:** każdy przebieg loguje w konsoli Vercela
+(Deployments -> Functions -> logi) szczegółowe statystyki — ile ogłoszeń znalazło
+każde słowo kluczowe i każdy kod CPV z osobna, dla każdego typu ogłoszenia —
+przydatne do oceny, które kryterium faktycznie coś łapie. Odpowiedź endpointu
+zawiera też listę nowo dodanych leadów (`nowLeady`), widoczną w logach GitHub Actions
+po każdym ręcznym lub automatycznym uruchomieniu.
+
+### 7. Test modułu 1
+- Zainstaluj zależności lokalnie: `npm install` (paczki `nodemailer` i `fast-xml-parser`
+  są w `package.json`).
 - Push do repo -> deploy na Vercelu (Vercel automatycznie zainstaluje zależności
   z `package.json` przy buildzie).
-- W zakładce GitHub Actions -> wybierz workflow -> "Run workflow" (ręczne odpalenie).
+- W zakładce GitHub Actions -> wybierz workflow "Scrape leady - przetargi" ->
+  "Run workflow" (ręczne odpalenie).
 - Sprawdź czy w tabeli `leady` w Supabase pojawił się rekord, czy przyszedł mail
   i czy przyszła wiadomość na Telegramie.
 
+## Moduł 2: nowe inwestycje przemysłowe (RSS)
+
+- `api/scrape-inwestycje.js` — Vercel Serverless Function. Monitoruje newsy
+  o nowych inwestycjach (hale produkcyjne, magazynowe, fabryki) jako wczesny
+  sygnał przyszłego zapotrzebowania na wykonawcę posadzki — długo zanim inwestor
+  ogłosi przetarg.
+- `.github/workflows/scrape-inwestycje.yml` — osobny harmonogram GitHub Actions,
+  co 4h (przesunięty 15 min względem modułu 1, żeby oba nie odpalały się
+  jednocześnie).
+
+**Źródło danych:** trzy darmowe, publiczne kanały RSS portalu branżowego
+propertynews.pl (Magazyny, Inwestycje, Tereny inwestycyjne) — bez klucza/rejestracji.
+Wpisy filtrowane są lokalnie po słowach kluczowych wskazujących na **nową budowę**
+(np. "buduje", "powstaje", "rozbudowa"), żeby odrzucić newsy niezwiązane
+z budową (np. wynajem istniejącej powierzchni, wyniki finansowe).
+
+**Uwaga — jakość leadów:** to sygnał pośredni i wcześniejszy niż w module 1.
+RSS nie podaje nazwy inwestora w ustrukturyzowanej formie (pole `firma` zostaje
+puste) — trzeba ją odczytać z treści newsa pod linkiem. Zaletą jest wyprzedzenie:
+często to pierwszy publiczny sygnał o inwestycji, zanim jeszcze powstanie
+jakikolwiek przetarg na wykonawcę.
+
+Dane zapisywane są do tej samej tabeli `leady` w Supabase co moduł 1,
+z `zrodlo = 'Inwestycje'` — więc oba moduły współdzielą bazę, deduplikację
+(po linku artykułu jako `external_id`) i powiadomienia mailowe/Telegram
+(osobne, zbiorcze na przebieg, tak jak w module 1).
+
+Chcesz dodać więcej kanałów RSS albo zmienić słowa kluczowe? Edytuj listy
+`RSS_FEEDS` / `KEYWORDS_BUDOWA` na początku pliku `api/scrape-inwestycje.js`.
+
+### Konfiguracja modułu 2
+Używa dokładnie tych samych zmiennych środowiskowych w Vercelu co moduł 1
+(Supabase, Gmail, Telegram, `CRON_SECRET`) — nic dodatkowego nie trzeba ustawiać
+tam. Jedyna nowa rzecz to sekret w GitHub Actions:
+- `SCRAPE_INWESTYCJE_ENDPOINT_URL` -> np. `https://twoja-domena.vercel.app/api/scrape-inwestycje`
+  (analogicznie do `SCRAPE_ENDPOINT_URL` z modułu 1, ale wskazujący na nowy endpoint)
+
+### Test modułu 2
+Identycznie jak w module 1: GitHub Actions -> workflow "Scrape leady - inwestycje"
+-> "Run workflow" -> sprawdź Supabase/mail/Telegram.
+
 ## Koszt
-Wszystko w darmowych tierach: Vercel Hobby, GitHub Actions (2000 min/mies za darmo),
-Supabase Free (500 MB bazy), Gmail (własne konto, limit ~500 maili/dzień),
-Telegram Bot (bez limitu). **0 zł/miesiąc.**
+Wszystko w darmowych tierach: Vercel Hobby, GitHub Actions (2000 min/mies za darmo,
+oba moduły razem to wciąż niewielki ułamek limitu), Supabase Free (500 MB bazy),
+Gmail (własne konto, limit ~500 maili/dzień), Telegram Bot (bez limitu),
+propertynews.pl RSS (publiczne, bez limitu). **0 zł/miesiąc.**
 
 ## Następne kroki
-- Moduł 2 (nowe inwestycje / CEIDG) — ta sama struktura, nowy plik
-  `api/scrape-inwestycje.js` + nowy krok w workflow GitHub Actions, zapis do tej
-  samej tabeli `leady` z `zrodlo = 'Inwestycje'`.
 - Moduł 4 (chatbot na stronie) — osobny endpoint real-time (nie cron), podłączony
   do tego samego Supabase/Gmail/Telegrama. Skoro Twoja strona Flowtex już jest na
   React/Vite + Vercel, to naturalnie dokłada się jako kolejny `/api/...` endpoint
   w tym samym projekcie.
-
