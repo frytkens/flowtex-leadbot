@@ -170,3 +170,4 @@ propertynews.pl RSS (publiczne, bez limitu). **0 zł/miesiąc.**
   do tego samego Supabase/Gmail/Telegrama. Skoro Twoja strona Flowtex już jest na
   React/Vite + Vercel, to naturalnie dokłada się jako kolejny `/api/...` endpoint
   w tym samym projekcie.
+
