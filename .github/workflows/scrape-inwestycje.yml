@@ -1,0 +1,19 @@
+name: Scrape leady - inwestycje
+
+on:
+  schedule:
+    # co 4 godziny (przesunięte 15 min względem modułu 1, żeby nie kolidowały)
+    - cron: '15 */4 * * *'
+  workflow_dispatch: {} # pozwala odpalić ręcznie z zakładki Actions
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wywołaj endpoint scrapera inwestycji na Vercelu
+        run: |
+          RESPONSE=$(curl -sS -X GET "${{ secrets.SCRAPE_INWESTYCJE_ENDPOINT_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --fail)
+          echo "Odpowiedź endpointu:"
+          echo "$RESPONSE" | python3 -m json.tool || echo "$RESPONSE"
