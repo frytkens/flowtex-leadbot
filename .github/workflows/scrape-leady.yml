@@ -2,8 +2,8 @@ name: Scrape leady - przetargi
 
 on:
   schedule:
-    # co 4 godziny
-    - cron: '0 */4 * * *'
+    # raz dziennie, o 6:00 UTC (ok. 7:00/8:00 czasu polskiego, zależnie od DST)
+    - cron: '0 6 * * *'
   workflow_dispatch: {} # pozwala odpalić ręcznie z zakładki Actions
 
 jobs:
