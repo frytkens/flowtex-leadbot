@@ -1,18 +1,18 @@
-name: Scrape leady - przetargi
+name: Scrape leady - inwestycje
 
 on:
   schedule:
-    # raz dziennie, o 6:00 UTC (ok. 7:00/8:00 czasu polskiego, zależnie od DST)
-    - cron: '0 9 * * *'
+    # raz dziennie, o 6:15 UTC (przesunięte 15 min względem modułu 1, żeby nie kolidowały)
+    - cron: '15 9 * * *'
   workflow_dispatch: {} # pozwala odpalić ręcznie z zakładki Actions
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Wywołaj endpoint scrapera na Vercelu
+      - name: Wywołaj endpoint scrapera inwestycji na Vercelu
         run: |
-          RESPONSE=$(curl -sS -X GET "${{ secrets.SCRAPE_ENDPOINT_URL }}" \
+          RESPONSE=$(curl -sS -X GET "${{ secrets.SCRAPE_INWESTYCJE_ENDPOINT_URL }}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             --fail)
           echo "Odpowiedź endpointu:"
